@@ -206,7 +206,7 @@ class Params:
     fast_len: int = 6         # ממוצע מהיר לקפיצות
     surge_days: int = 4       # כמה נרות ירוקים רצופים
     surge_pct: float = 20.0   # עלייה מצטברת מינימלית (%)
-    strict_fast: bool = False  # האם גם ב-MA6 נדרש נר שלא נוגע בקו
+    strict_fast: bool = False # האם גם ב-MA6 נדרש נר שלא נוגע בקו
     closed_only: bool = True  # להתבסס על נרות סגורים בלבד
 
 
@@ -226,7 +226,9 @@ def rsi(series: pd.Series, n: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
-    return 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    rs = gain / loss.replace(0, np.nan)
+    res = 100 - (100 / (1 + rs))
+    return res.fillna(100)
 
 
 def prepare(df: pd.DataFrame, p: Params) -> pd.DataFrame:
@@ -309,7 +311,8 @@ class Eval:
 def attractiveness(d: pd.DataFrame, p: Params) -> float:
     """דירוג עזר (0–100) למניות שעומדות בכללי הכניסה: קרבה לקו, מגמה, נפח ו-RSI."""
     r = d.iloc[-1]
-    s = max(0.0, 1 - r["dist"] / p.max_dist) * 40 if p.max_dist > 0 else 0.0
+    dist_val = float(r["dist"])
+    s = max(0.0, min(1.0, 1 - dist_val / p.max_dist)) * 40 if p.max_dist > 0 else 0.0
     try:
         s += 15 if d["MA"].iloc[-1] > d["MA"].iloc[-11] else 0
     except Exception:
@@ -494,10 +497,13 @@ def load_store() -> dict:
 
 
 def save_store(data: dict) -> None:
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
-    os.replace(tmp, STORE_PATH)
+    try:
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+        os.replace(tmp, STORE_PATH)
+    except Exception as e:
+        print(f"שגיאה בשמירת קובץ הנתונים: {e}")
 
 
 def upsert_position(store: dict, symbol: str, status: str, entry_price: float | None = None,
@@ -620,11 +626,11 @@ def check_positions(store: dict, p: Params, send: bool = True) -> list[dict]:
 # ════════════════════════════ מתחת לרדאר: מדדים ════════════════════════════
 @dataclass(frozen=True)
 class PivotParams:
-    band: float = 1.7            # יחס מקס'/מין' שעדיין נחשב דשדוש
-    min_flat_days: int = 252     # אורך דשדוש מינימלי (ימי מסחר)
-    min_dd: float = 40.0         # ירידה מינימלית משיא 3 שנים (%)
-    max_rise: float = 40.0       # עלייה מקסימלית משפל 52 שבועות (%)
-    max_3m: float = 30.0         # עלייה מקסימלית ב-3 חודשים (%)
+    band: float = 1.7             # יחס מקס'/מין' שעדיין נחשב דשדוש
+    min_flat_days: int = 252      # אורך דשדוש מינימלי (ימי מסחר)
+    min_dd: float = 40.0          # ירידה מינימלית משיא 3 שנים (%)
+    max_rise: float = 40.0        # עלייה מקסימלית משפל 52 שבועות (%)
+    max_3m: float = 30.0          # עלייה מקסימלית ב-3 חודשים (%)
     insider_days: int = 180
     runway_min: int = 18
     seg_min: float = 25.0
@@ -688,7 +694,7 @@ def fundamentals(info: dict) -> dict:
         runway = float(cash) / (-basis / 12)
     shares, rev = g("sharesOutstanding"), g("totalRevenue")
     rps = g("revenuePerShare") or (rev / shares if rev and shares else None)
-    pct = lambda k: (g(k) * 100 if g(k) is not None else None)  # noqa: E731
+    pct = lambda k: (g(k) * 100 if g(k) is not None else None)
     return {"name": g("longName") or g("shortName"), "sector": g("sector"), "industry": g("industry"),
             "cash": cash, "debt": g("totalDebt"), "fcf": fcf, "runway": runway,
             "rev_growth": pct("revenueGrowth"), "gross_margin": pct("grossMargins"), "op_margin": pct("operatingMargins"),
@@ -734,7 +740,6 @@ PARTS = {  # id: (כותרת, משקל, אייקון)
 }
 MATURITY = {1: "תכנון והצהרות", 2: "השקעות וניקוי אורוות", 3: "הכנסות ראשוניות ואימוץ", 4: "רווחיות ופריצה בשוק"}
 
-# (id, חלק, שאלה, הסבר, מפתח אוטומטי)
 QUESTIONS = [
     ("1.1", 1, "הפיבוט ברור: ממודל עסקי ישן בתעשייה אחת למודל חדש בשוק אחר",
      "מהו המודל הישן ובאיזו תעשייה, ולאיזה מודל חדש ובאיזה שוק החברה עוברת כעת?", None),
@@ -933,6 +938,19 @@ def stage1_scan(symbols: list[str], pp: PivotParams, progress=None) -> list[dict
         if int(pre["dormant"]) + int(pre["battered"]) + int(pre["quiet"]) >= 2:
             pre = pivot_metrics(df, {}, get_insiders(s), pp)
         rows.append({"symbol": s, **{k2: pre[k2] for k2 in ("price", "dd", "rise52", "ret3m", "flat_days",
-                                                              "dormant", "battered", "quiet", "insider_buy", "s1_met")},
+                                                            "dormant", "battered", "quiet", "insider_buy", "s1_met")},
                      "buys": pre["ins"]["buys"]})
     return sorted(rows, key=lambda r: (-r["s1_met"], r["dd"]))
+
+
+# ════════════════════════════ הרצה בדיקה ════════════════════════════
+if __name__ == "__main__":
+    print("=== בדיקת תקינות מנוע הלוגיקה (core.py) ===")
+    p = Params()
+    test_symbols = ["AAPL", "NVDA", "TEVA"]
+    print(f"מוריד נתונים ובודק מניות: {test_symbols}...")
+    
+    results = scan_universe(test_symbols, p)
+    print(f"הבדיקה הסתיימה בהצלחה! עובדו {len(results)} מניות.")
+    for res in results:
+        print(f"• [{res.symbol}] מחיר: {res.price:,.2f} | סטטוס: {res.label} (קוד: {res.code})")
